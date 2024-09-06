@@ -59,19 +59,20 @@
 
 Код этапа 1:
 ```scala
-val edgesWithNodeDegree = edges
-  .flatMap { case (u,v) => Array((u,v), (v,u)) }
-  .groupByKey()
-  .flatMap { case (u, vs) =>
-    val d = vs.size
-    val node = Node(u, d)
-    vs.map(v => (v, node))
-  }.groupByKey()
-  .flatMap { case (v, us) =>
-    val d = us.size
-    val node = Node(v, d)
-    us.map( u => (u, node))
-  }
+val edgesWithNodeDegree: RDD[(Node, Node)] =
+  edges
+    .flatMap { case (u,v) => Array((u,v), (v,u)) }
+    .groupByKey()
+    .flatMap { case (u, vs) =>
+      val d = vs.size
+      val node = Node(u, d)
+      vs.map(v => (v, node))
+    }.groupByKey()
+    .flatMap { case (v, us) =>
+      val d = us.size
+      val node = Node(v, d)
+      us.map( u => (u, node))
+    }
 ```
 
 
@@ -82,8 +83,9 @@ val edgesWithNodeDegree = edges
 
 Код этапа 2:
 ```scala
-val  filteredEdges = edgesWithNodeDegree
-  .filter { case (u,v) =>  u.degree >= k - 1 && v.degree >= k - 1 && u < v }
+val  filteredEdges: RDD[(Node, Node)] =
+  edgesWithNodeDegree
+    .filter { case (u,v) =>  u.degree >= k - 1 && v.degree >= k - 1 && u < v }
 ```
 
 ###  Этап 3 - определение смежных вершин
@@ -91,8 +93,9 @@ val  filteredEdges = edgesWithNodeDegree
 
 Код этапа 3:
 ```scala
-val adjacencyList =  filteredEdges
-  .groupByKey()
+val adjacencyList: RDD[(Node, Iterable[Node])] =
+  filteredEdges
+    .groupByKey()
     
 ```
 
@@ -110,25 +113,28 @@ List(u))$.
 этой вершины. Группируем по $u$, получаем ``RDD[Node, Interable[(Node, Node)]]`` с множеством окрестностей графа.
 
 ```scala
-val combinations = adjacencyList.mapPartitions { it =>
-  it.flatMap {
-    case (u, x) =>
-      combinationIterator(x).map(c => (c, u))
+val combinations: RDD[((Node, Node), Node)] =
+  adjacencyList.mapPartitions { it =>
+    it.flatMap {
+      case (u, x) =>
+        combinationIterator(x).map(c => (c, u))
+    }
   }
-}
 
-val union =  filteredEdges
-  .map{ case (u,v) => ((u,v), MARK)}
-  .union(combinations)
-  .persist(StorageLevel.MEMORY_AND_DISK)
+val union: RDD[((Node, Node), Node)] =
+  filteredEdges
+    .map{ case (u,v) => ((u,v), MARK)}
+    .union(combinations)
+    .persist(StorageLevel.MEMORY_AND_DISK)
 
-val neighborhoods = union
-  .groupByKey()
-  .collect { case ((xi, xj), us) if us.iterator.contains(MARK) => ((xi, xj), us.filterNot(_ == MARK))}
-  .flatMap { case ((xi, xj), us) =>
-    us.map( u => (u, (xi, xj)))
-  }
-  .groupByKey()
+val neighborhoods: RDD[(Node, Iterable[(Node, Node)])] =
+  union
+    .groupByKey()
+    .collect { case ((xi, xj), us) if us.iterator.contains(MARK) => ((xi, xj), us.filterNot(_ == MARK))}
+    .flatMap { case ((xi, xj), us) =>
+      us.map( u => (u, (xi, xj)))
+    }
+    .groupByKey()
 ```
 
 ### Этап 5 - подсчет *k-1* кликов для каждой окрестности и суммирование результатов
@@ -137,17 +143,19 @@ val neighborhoods = union
 кол-во $k$ клик в графе
 
 ```scala
-val kCliques = neighborhoods
-  .map { case (u, xs) =>
-     val g = new SimpleGraph[Int, DefaultEdge](classOf[DefaultEdge])
-     xs.foreach { case (xi, xj) =>
-       g.addVertex(xi.id)
-       g.addVertex(xj.id)
-       g.addEdge(xi.id, xj.id)
-     }
-     KCliqueLocal(g).countKCliques(k - 1).toLong
-  }
-val numOfCliques = kCliques.reduce(_ + _)
+val kCliques: RDD[Long] =
+  neighborhoods
+    .map { case (u, xs) =>
+      val g = new SimpleGraph[Int, DefaultEdge](classOf[DefaultEdge])
+      xs.foreach { case (xi, xj) =>
+        g.addVertex(xi.id)
+        g.addVertex(xj.id)
+        g.addEdge(xi.id, xj.id)
+      }
+      KCliqueLocal(g).countKCliques(k - 1).toLong
+    }
+
+val numOfCliques: Long = kCliques.reduce(_ + _)
 ```
 
 

@@ -1,3 +1,4 @@
+import org.apache.spark.rdd.RDD
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.{SparkConf, SparkContext}
 import org.jgrapht.graph.{DefaultEdge, SimpleGraph}
@@ -27,9 +28,10 @@ object KCliqueSpark {
     val sc = SparkContext.getOrCreate(sparkConf)
 
     val k = args(0).toInt
-    val src = sc.textFile(args(1))
+    val src: RDD[String] = sc.textFile(args(1))
 
-    val edges = src
+    val edges: RDD[(Int, Int)] =
+      src
       .filter(!_.startsWith("#"))
       .map { str =>
         str.split("\\s+") match {
@@ -41,60 +43,69 @@ object KCliqueSpark {
       }.repartition(sc.defaultParallelism)
 
 
-    val edgesWithNodeDegree = edges
-      .flatMap { case (u,v) => Array((u,v), (v,u)) }
-      .groupByKey()
-      .flatMap { case (u, vs) =>
-        val d = vs.size
-        val node = Node(u, d)
-        vs.map(v => (v, node))
-      }.groupByKey()
-      .flatMap { case (v, us) =>
-        val d = us.size
-        val node = Node(v, d)
-        us.map( u => (u, node))
+    val edgesWithNodeDegree: RDD[(Node, Node)] =
+      edges
+        .flatMap { case (u,v) => Array((u,v), (v,u)) }
+        .groupByKey()
+        .flatMap { case (u, vs) =>
+          val d = vs.size
+          val node = Node(u, d)
+          vs.map(v => (v, node))
+        }.groupByKey()
+        .flatMap { case (v, us) =>
+          val d = us.size
+          val node = Node(v, d)
+          us.map( u => (u, node))
+        }
+
+
+
+    val filteredEdges: RDD[(Node, Node)] =
+      edgesWithNodeDegree
+        .filter { case (u,v) =>  u.degree >= k - 1 && v.degree >= k - 1 && u < v }
+
+    val adjacencyList: RDD[(Node, Iterable[Node])] =
+      filteredEdges
+        .groupByKey()
+
+    val combinations: RDD[((Node, Node), Node)] =
+      adjacencyList.mapPartitions { it =>
+        it.flatMap {
+          case (u, x) =>
+            combinationIterator(x).map(c => (c, u))
+        }
       }
 
+    val union: RDD[((Node, Node), Node)] =
+      filteredEdges
+        .map{ case (u,v) => ((u,v), MARK)}
+        .union(combinations)
+        .persist(StorageLevel.MEMORY_AND_DISK)
+
+    val neighborhoods: RDD[(Node, Iterable[(Node, Node)])] =
+      union
+        .groupByKey()
+        .collect { case ((xi, xj), us) if us.iterator.contains(MARK) => ((xi, xj), us.filterNot(_ == MARK))}
+        .flatMap { case ((xi, xj), us) =>
+          us.map( u => (u, (xi, xj)))
+        }
+        .groupByKey()
 
 
-    val  filteredEdges = edgesWithNodeDegree
-      .filter { case (u,v) =>  u.degree >= k - 1 && v.degree >= k - 1 && u < v }
+    val kCliques: RDD[Long] =
+      neighborhoods
+        .map { case (u, xs) =>
+           val g = new SimpleGraph[Int, DefaultEdge](classOf[DefaultEdge])
+           xs.foreach { case (xi, xj) =>
+             g.addVertex(xi.id)
+             g.addVertex(xj.id)
+             g.addEdge(xi.id, xj.id)
+           }
+           KCliqueLocal(g).countKCliques(k - 1).toLong
+        }
 
-    val adjacencyList =  filteredEdges
-      .groupByKey()
+    val numOfCliques: Long = kCliques.reduce(_ + _)
 
-    val combinations = adjacencyList.mapPartitions { it =>
-      it.flatMap {
-        case (u, x) =>
-          combinationIterator(x).map(c => (c, u))
-      }
-    }
-
-    val union =  filteredEdges
-      .map{ case (u,v) => ((u,v), MARK)}
-      .union(combinations)
-      .persist(StorageLevel.MEMORY_AND_DISK)
-
-    val neighborhoods = union
-      .groupByKey()
-      .collect { case ((xi, xj), us) if us.iterator.contains(MARK) => ((xi, xj), us.filterNot(_ == MARK))}
-      .flatMap { case ((xi, xj), us) =>
-        us.map( u => (u, (xi, xj)))
-      }
-      .groupByKey()
-
-
-    val kCliques = neighborhoods
-      .map { case (u, xs) =>
-         val g = new SimpleGraph[Int, DefaultEdge](classOf[DefaultEdge])
-         xs.foreach { case (xi, xj) =>
-           g.addVertex(xi.id)
-           g.addVertex(xj.id)
-           g.addEdge(xi.id, xj.id)
-         }
-         KCliqueLocal(g).countKCliques(k - 1).toLong
-      }
-    val numOfCliques = kCliques.reduce(_ + _)
     println(s"Number of $k-cliques is ${numOfCliques}")
   }
 
